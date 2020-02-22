@@ -1,0 +1,360 @@
+#!/bin/bash
+###################################################################################
+# The utility is a wrapper script that can map the partitions from vm image, 
+# and mount them to local directories.
+# Usage:
+# Usage:   mntimg.sh  <image file> <mount point>
+# Options: -u <image file> umount image file.
+#          -l display all mounted images
+#          -c umount all images
+#          -v show version info.
+#          -d display tracing msgs.
+#          -h show this usage info.
+# Examples:
+#    # ./mntimg.sh system.img /OVS/frdeng/t/os
+#    # ./mntimg.sh -l
+#     MOUNTED IMAGE:/OVS/frdeng/t/system.img /dev/loop2
+#      |- MOUNTED DIR:/dev/mapper/loop2p1 /OVS/frdeng/t/os/1
+#      |- MOUNTED DIR:/dev/mapper/VolGroup00-LogVol00 /OVS/frdeng/t/os/2
+#    # ./mntimg.sh -u system.img
+# 
+# Known issues:
+# 1. mntimg.sh can not mount old oracle database image, because the image 
+# doesn't have partition, the whole disk was created as a LVM PV.
+# 2. mntimg.sh can not at same time mount two images that have same LVM VG 
+# name.
+#
+# Changelog:
+# Oct 9  2017 -frank.deng@oracle.com
+# - mount /dev/dm-* when /dev/mapper/loop* is symbol link
+# - Added xfs and vfat mount support
+# Aug 12 2014 - frank.deng@oracle.com
+# - Added ext4 fs support
+# Dec 30 2009 - frank.deng@oracle.com
+# - sync before umount.
+# Dec 9 2008 - frank.deng@oracle.com
+# - fix. exit when failed to umount dir.
+# Sep 1 2008 - frank.deng@oracle.com
+# - created.
+###################################################################################
+
+case "$ORACLE_TRACE" in
+  T) set -x;;
+  *) ;;
+esac
+
+Usage() {
+    cat <<EOF
+Usage:   ${0##*/} <image file> <mount point>
+Options: -u <image file> umount image file.
+         -l display all mounted images
+         -c umount all images
+         -v show version info.
+         -d display tracing msgs.
+         -h show this usage info.
+EOF
+}
+
+Error() {
+  echo "ERROR: $1">&2
+  echo
+  [ "$2" = "u" ] && Usage
+  exit 1
+}
+
+umount_img() {
+    local f
+    f=$1
+    lp_device=$(cat $f | grep "MOUNTED IMAGE" | awk -F: '{print $2}'| awk '{print $2}')
+    image_file=$(cat $f | grep "MOUNTED IMAGE" | awk -F: '{print $2}'| awk '{print $1}')
+    mounteddirs=$(grep "MOUNTED DIR" $f | awk -F: '{print $2}' | awk '{print $2}')
+    lvmgroups=$(grep "LVM GROUP" $f | awk -F: '{print $2}')
+    if [ -f "$image_file" ]; then
+      sync;sync;sync
+      # umount boot/efi /proc, /dev /sys first
+      for dir_name in $mounteddirs; do 
+        if echo "$dir_name" | egrep -q "boot/efi|/proc|/dev|/sys" && \
+            [ -d "$dir_name" ] && grep -q $dir_name /proc/mounts; then
+          if ! umount $dir_name; then
+            Error "Unable to umount $dir_name."
+          fi
+        fi
+        # umount done, remove entry from database
+        ftmp=$(mktemp /tmp/mntimg.XXXXX)
+        grep -v "$dir_name$" $f > $ftmp
+        /bin/mv -f $ftmp $f
+      done
+      # umount the rest
+      for dir_name in $mounteddirs; do 
+        if [ -d "$dir_name" ] && grep -q $dir_name /proc/mounts; then
+          if ! umount $dir_name; then
+            Error "Unable to umount $dir_name."
+          fi
+        fi
+        # umount done, remove entry from database
+        ftmp=$(mktemp /tmp/mntimg.XXXXX)
+        grep -v "$dir_name$" $f > $ftmp
+        /bin/mv -f $ftmp $f
+      done
+      for vg_name in $lvmgroups; do
+        vgchange -an $vg_name >/dev/null
+      done
+      kpartx -d $lp_device
+      losetup -d $lp_device
+    fi
+    rm -f $f
+}
+
+list_mnt() {
+    local f=$1
+    local lp_device=$(cat $f | grep "MOUNTED IMAGE" | awk -F: '{print $2}'| awk '{print $2}')
+    local image_file=$(cat $f | grep "MOUNTED IMAGE" | awk -F: '{print $2}'| awk '{print $1}')
+    if [ -f "$image_file" ]; then
+      echo "--------------------------------------------------------------------"
+      cat "$f" | grep "MOUNTED IMAGE"
+      # umount first
+      cat "$f" | grep "MOUNTED DIR" | while read line; do
+        echo " |- $line"
+      done
+      cat $f | grep "LVM GROUP"
+    fi
+}
+
+get_image_id () {
+    echo "$1" | sha256sum | awk '{print $1}'
+}
+
+#####################################################################
+
+# define and env variables
+
+VERSION=1.0.0b3
+
+#default ACTION=mount
+ACTION=mount
+
+WORK_HOME=~/.mntimg
+ID=
+ROOTFS=0
+
+# main ###############################################################
+
+# must run as root
+if [ $(id -u) -ne 0 ]; then
+    Error "You must run $0 as root user."
+fi
+# handle arguments
+while getopts "uclrdvh" OPTION; do
+    case "$OPTION" in
+      u)
+        ACTION=umount
+        ;;
+      c)
+        ACTION=umountall
+        ;;
+      l)
+        ACTION=list
+        ;;
+      r)
+        ROOTFS=1
+        ;;
+      d)
+        export ORACLE_TRACE=T
+        set -v -x
+        ;;
+      v)
+        echo $VERSION && exit 0
+        ;;
+      h)
+        Usage && exit 0
+        ;;
+      *)
+        Error "Wrong argument" u
+        ;;
+    esac
+done
+shift $(($OPTIND - 1))
+IMAGE_FILE="$1"
+shift
+MOUNT_POINT="$1"
+
+IMAGE_FILE=$(readlink -f "$IMAGE_FILE")
+MOUNT_POINT=$(readlink -f "$MOUNT_POINT")
+
+# check arguments
+if [ $ACTION = mount -o $ACTION = umount ]; then
+  if ! file $IMAGE_FILE | grep -q partition; then
+     Error "Image file does NOT seem to have partitions."
+  fi
+fi
+
+if [ $ACTION = mount ]; then
+  if [ ! -d "$MOUNT_POINT" ]; then
+     Error "Mount point directory $MOUNT_POINT does NOT exist" u
+  fi
+fi
+
+if [ $ACTION = list -a -n "$IMAGE_FILE" ]; then
+  if [ ! -f "$IMAGE_FILE" ]; then
+     Error "Image file $IMAGE_FILE does NOT exist" u
+  fi
+fi
+
+# create working dir
+mkdir -p $WORK_HOME
+
+case "$ACTION" in
+##########################################################################
+# action mount
+mount)
+    ID=$(get_image_id "$IMAGE_FILE")
+    if [ -f "$WORK_HOME/$ID" ]; then
+      Error "$IMAGE_FILE has already been mounted"
+    fi
+    #echo "Mounted Image:$IMAGE_FILE>$WORK_HOME/$ID"
+
+    # setup loop
+    LPDEVICE=$(losetup -f)
+    if ! losetup -f $IMAGE_FILE; then
+      Error "setup loop device failed."
+    fi
+    # lock
+    echo "MOUNTED IMAGE:$IMAGE_FILE $LPDEVICE" > $WORK_HOME/$ID
+
+    # map device
+    if ! kpartx -a $LPDEVICE; then
+      losetup -d $LPDEVICE
+      Error "kpartx map $LPDEVICE fail."
+    fi
+
+    mapped_devices=$(kpartx -l $LPDEVICE | grep $LPDEVICE | awk '{print $1}' | sort)
+    ct=1
+    for d in $mapped_devices; do
+      mkdir -p $MOUNT_POINT/$ct
+      mapped_dev="/dev/mapper/$d"
+      dev=$(readlink -f "$mapped_dev")
+      file -s $dev
+      file_desc=$(file -s $dev 2>&1)
+      # normal ext3, ext4, xfs, or vfat
+      if echo "$file_desc" | egrep -q -i "ext3|ext4|xfs|mkdosfs"; then
+         mount $dev $MOUNT_POINT/$ct
+         echo "MOUNTED DIR:$mapped_dev $MOUNT_POINT/$ct" | tee -a $WORK_HOME/$ID
+         ct=$(($ct+1))
+      # ocfs2 - not test yet
+      elif echo "$file_desc" | grep -q -i ocfs2; then
+         mount $dev $MOUNT_POINT/$ct
+         echo "MOUNTED DIR:$mapped_dev $MOUNT_POINT/$ct" | tee -a $WORK_HOME/$ID
+         ct=$(($ct+1))
+      # LVM2
+      elif echo "$file_desc" | grep -q LVM2; then
+         pvscan >/dev/null
+         vg_name=$(pvs | grep $d | awk '{print $2}')
+         grep -q $vg_name $WORK_HOME/$ID && continue
+         vgscan >/dev/null
+         vgchange -ay $vg_name >/dev/null
+         vgscan > /dev/null
+         if ls /dev/mapper/${vg_name}* >/dev/null 2>&1; then
+           echo "LVM GROUP:$vg_name" >> $WORK_HOME/$ID
+           for dd in $(ls /dev/mapper/${vg_name}*); do
+             if file -s $dd | egrep -q -i "ext3|ext4"; then
+               mount $dd $MOUNT_POINT/$ct
+               echo "MOUNTED DIR:$dd $MOUNT_POINT/$ct" | tee -a $WORK_HOME/$ID
+               ct=$(($ct+1))
+             else
+               echo "$dd not mounted - Unknow filesystem."
+             fi
+           done
+         fi
+      elif echo "$file_desc" | grep swap; then
+         echo "$mapped_dev not mounted - swap"
+      # other
+      else
+         echo "$mapped_dev not mounted - Unknow filesystem."
+      fi
+    done
+    # remount to $MOUNT_POINT for chroot, mount efi boot partition to $MOUNT_POINT/efi/boot
+    if [ "$ROOTFS" -eq 1 ]; then
+        echo "Remounting for chroot"
+        boot_dev=
+        root_dev=
+        boot_mnt=
+        root_mnt=
+        # identify boot partition
+        orig_ifs=$IFS
+        IFS=$'\n'
+        for line in $(grep 'MOUNTED DIR' $WORK_HOME/$ID); do
+            lp_dev=$(echo "$line" | awk -F: '{print $2}'| awk '{print $1}')
+            mp=$(echo "$line" | awk -F: '{print $2}'| awk '{print $2}')
+            if [ -f "$mp/EFI/BOOT/BOOTX64.EFI" -o -f "$mp/EFI/redhat/grub.efi" ]; then
+                boot_dev=$lp_dev
+                boot_mnt=$mp
+            elif [ -f "$mp/etc/os-release" ]; then
+                root_dev=$lp_dev
+                root_mnt=$mp
+            fi
+        done
+        IFS=$orig_ifs
+        if [ -n "$boot_dev" -a -n "$root_dev" ]; then
+            # umount
+            umount $boot_mnt
+            ftmp=$(mktemp /tmp/mntimg.XXXXX)
+            grep -v "$boot_mnt$" $WORK_HOME/$ID > $ftmp
+            /bin/mv -f $ftmp $WORK_HOME/$ID
+            umount $root_mnt
+            ftmp=$(mktemp /tmp/mntimg.XXXXX)
+            grep -v "$root_mnt$" $WORK_HOME/$ID > $ftmp
+            /bin/mv -f $ftmp $WORK_HOME/$ID
+            # remount
+            dev=$(readlink -f "$root_dev")
+            mount $dev $MOUNT_POINT
+            echo "MOUNTED DIR:$root_dev $MOUNT_POINT" | tee -a $WORK_HOME/$ID
+            dev=$(readlink -f "$boot_dev")
+            mount $dev $MOUNT_POINT/boot/efi
+            echo "MOUNTED DIR:$boot_dev $MOUNT_POINT/boot/efi" | tee -a $WORK_HOME/$ID
+            # mount /dev, /proc /sys for chroot
+            mount --bind /dev/ $MOUNT_POINT/dev
+            echo "MOUNTED DIR:/dev $MOUNT_POINT/dev" | tee -a $WORK_HOME/$ID
+            mount -t proc none $MOUNT_POINT/proc
+            echo "MOUNTED DIR:none $MOUNT_POINT/proc" | tee -a $WORK_HOME/$ID
+            mount -t sysfs none $MOUNT_POINT/sys
+            echo "MOUNTED DIR:none $MOUNT_POINT/sys" | tee -a $WORK_HOME/$ID
+        fi
+    fi
+    ;;
+
+############################################################################
+umountall)
+    for f in $(ls $WORK_HOME); do
+        umount_img $WORK_HOME/$f
+      done
+      ;;
+############################################################################
+# action umount
+umount)
+    ID=$(get_image_id "$IMAGE_FILE")
+    if [ ! -f "$WORK_HOME/$ID" ]; then
+      Error "$IMAGE_FILE has not been mounted"
+    fi
+    umount_img $WORK_HOME/$ID
+    ;;
+############################################################################
+# list all mounted images or specified mounted image
+list)
+    if [ -f "$IMAGE_FILE" ]; then
+        ID=$(get_image_id "$IMAGE_FILE")
+        if [ ! -f "$WORK_HOME/$ID" ]; then
+            Error "$IMAGE_FILE not mounted"
+        else
+            list_mnt "$WORK_HOME/$ID"
+        fi
+    else
+        for id in $(ls $WORK_HOME); do
+           list_mnt "$WORK_HOME/$id"
+        done
+    fi
+    ;;
+##########################################################################
+*)
+  Error "unexpected error" u
+;;
+esac

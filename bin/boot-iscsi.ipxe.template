@@ -1,0 +1,80 @@
+#!ipxe
+
+echo {{HOSTNAME}} iSCSI boot ipxe script
+
+:loop
+
+echo
+echo "###############################################"
+echo BEGIN iPXE Embedded Config!
+echo HW info :
+echo Hostname.......${hostname}
+echo Serial.........${serial}
+echo Asset number...${asset}
+echo Manufacturer...${manufacturer}
+echo Product........${product}
+echo BIOS platform..${platform}
+echo CPU arch.......${buildarch}
+echo Unix Time......${unixtime}
+
+dhcp || goto loop
+
+echo NETWORK info :
+echo IP address.....${ip}
+echo Netmask........${netmask}
+echo Gateway........${gateway}
+echo Domain.........${domain}
+echo DNS............${dns}
+echo Next Server....${next-server}
+echo DHCP...........${dhcp-server}
+echo Initiator......${initiator-iqn}
+
+#set keep-san 1
+#set initiator-iqn iqn.2015-02.oracle.boot:{{HOSTNAME}}
+#set target-iqn iqn.2015-02.oracle.boot:uefi
+#set root-path iscsi:{{TARGET_IP}}::::${target-iqn}
+#sanhook ${root-path} || echo could not attach ${root-path}
+# set uefi-filename \EFI\redhat\grubx64.efi
+#sleep 5
+#sanboot
+
+echo attempting to boot off EFI
+echo Some failures here are expected
+
+sanhook iscsi:{{TARGET_IP}}::::iqn.2015-02.oracle.boot:uefi
+sleep 5
+
+:loop1
+
+echo \EFI\Microsoft\Boot\bootmgfw.efi
+set uefi-filename \EFI\Microsoft\Boot\bootmgfw.efi
+sanboot --keep ||
+echo \EFI\redhat\grub.efi
+set uefi-filename \EFI\redhat\grub.efi
+sanboot --keep ||
+echo \EFI\ubuntu\grubx64.efi
+set uefi-filename \EFI\ubuntu\grubx64.efi
+sanboot --keep ||
+echo \EFI\centos\grubx64.efi
+set uefi-filename \EFI\centos\grubx64.efi
+sanboot --keep ||
+echo \EFI\SuSE\elilo.efi
+set uefi-filename \EFI\SuSE\elilo.efi
+sanboot --keep ||
+echo \EFI\ORACLE\grubx64.efi
+set uefi-filename \EFI\ORACLE\grubx64.efi
+sanboot --keep ||
+#echo \EFI\BOOT\BOOTX64.EFI
+#set uefi-filename \EFI\BOOT\BOOTX64.EFI
+#sanboot --keep ||
+echo \EFI\redhat\grubx64.efi
+set uefi-filename \EFI\redhat\grubx64.efi
+sanboot --keep ||
+echo \EFI\debian\grubx64.efi
+set uefi-filename \EFI\debian\grubx64.efi
+sanboot --keep || goto retry
+
+:retry
+sleep 5
+echo Re-trying...
+goto loop1

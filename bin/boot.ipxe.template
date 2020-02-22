@@ -1,0 +1,63 @@
+#!ipxe
+
+echo {{HOSTNAME}} ipxe script
+
+:loop
+dhcp || goto loop
+
+echo
+echo "###############################################"
+echo BEGIN iPXE Embedded Config!
+echo HW info :
+echo Hostname.......${hostname}
+echo Serial.........${serial}
+echo Asset number...${asset}
+echo Manufacturer...${manufacturer}
+echo Product........${product}
+echo BIOS platform..${platform}
+echo CPU arch.......${buildarch}
+echo Unix Time......${unixtime}
+
+echo NETWORK info :
+echo IP address.....${ip}
+echo Netmask........${netmask}
+echo Gateway........${gateway}
+echo Domain.........${domain}
+echo DNS............${dns}
+echo Next Server....${next-server}
+echo DHCP...........${dhcp-server}
+echo Initiator......${initiator-iqn}
+
+#set keep-san 1
+#set initiator-iqn iqn.2015-02.oracle.boot:{{HOSTNAME}}
+#set target-iqn iqn.2015-02.oracle.boot:uefi
+#set root-path iscsi:{{TARGET_IP}}::::${target-iqn}
+#sanhook ${root-path} || echo could not attach ${root-path}
+# set uefi-filename \EFI\redhat\grubx64.efi
+#sleep 5
+#sanboot
+
+sanhook iscsi:{{TARGET_IP}}::::iqn.2015-02.oracle.boot:uefi
+sleep 5
+
+:loop1
+set uefi-filename \EFI\redhat\grub.efi
+sanboot --keep ||
+set uefi-filename \EFI\ubuntu\grubx64.efi
+sanboot --keep ||
+set uefi-filename \EFI\centos\grubx64.efi
+sanboot --keep ||
+set uefi-filename \EFI\SuSE\elilo.efi
+sanboot --keep ||
+set uefi-filename \EFI\Microsoft\Boot\bootmgfw.efi
+sanboot --keep ||
+set uefi-filename \EFI\ORACLE\grubx64.efi
+sanboot --keep ||
+set uefi-filename \EFI\BOOT\BOOTX64.EFI
+sanboot --keep ||
+set uefi-filename \EFI\redhat\grubx64.efi
+sanboot --keep || goto retry
+:retry
+sleep 5
+goto loop1
+

@@ -1,0 +1,22 @@
+#!ipxe
+
+echo {{HOSTNAME}} PV boot ipxe script
+
+echo
+echo ###############################################
+echo HW info :
+echo Hostname.......${hostname}
+echo Serial.........${serial}
+echo Asset number...${asset}
+echo Manufacturer...${manufacturer}
+echo Product........${product}
+echo BIOS platform..${platform}
+echo CPU arch.......${buildarch}
+echo Unix Time......${unixtime}
+
+echo ###############################################
+echo Additional info (for testing):
+echo iPXE Version...${version}
+echo Boot file......${filename}
+
+sleep 5
